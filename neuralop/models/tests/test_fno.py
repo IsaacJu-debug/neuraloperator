@@ -18,8 +18,9 @@ tenalg.set_backend("einsum")
 @pytest.mark.parametrize("n_dim", [1, 2, 3, 4])
 @pytest.mark.parametrize("fno_block_precision", ["full", "half", "mixed"])
 @pytest.mark.parametrize("stabilizer", [None, "tanh"])
-@pytest.mark.parametrize("lifting_channels", [None, 256])
+@pytest.mark.parametrize("lifting_channels", [None, 32])
 @pytest.mark.parametrize("preactivation", [False, True])
+@pytest.mark.parametrize("complex_data", [False, True])
 def test_tfno(
     factorization,
     implementation,
@@ -28,6 +29,7 @@ def test_tfno(
     stabilizer,
     lifting_channels,
     preactivation,
+    complex_data
 ):
     if torch.has_cuda:
         device = "cuda"
@@ -36,9 +38,8 @@ def test_tfno(
         width = 16
         fc_channels = 16
         batch_size = 4
-        use_mlp = True
+        use_channel_mlp = True
         n_layers = 4
-        mlp = Bunch(dict(expansion=0.5, dropout=0))
     else:
         device = "cpu"
         fno_block_precision = "full"
@@ -49,8 +50,7 @@ def test_tfno(
         batch_size = 3
         n_layers = 2
 
-        use_mlp = True
-        mlp = Bunch(dict(expansion=0.5, dropout=0))
+        use_channel_mlp = True
 
     rank = 0.2
     size = (s,) * n_dim
@@ -65,14 +65,18 @@ def test_tfno(
         joint_factorization=False,
         n_layers=n_layers,
         fno_block_precision=fno_block_precision,
-        use_mlp=use_mlp,
-        mlp=mlp,
+        use_channel_mlp=use_channel_mlp,
         stabilizer=stabilizer,
         fc_channels=fc_channels,
         lifting_channels=lifting_channels,
         preactivation=preactivation,
+        complex_data=complex_data
     ).to(device)
-    in_data = torch.randn(batch_size, 3, *size).to(device)
+
+    if complex_data:
+        in_data = torch.randn(batch_size, 3, *size, dtype=torch.cfloat).to(device)
+    else:
+        in_data = torch.randn(batch_size, 3, *size).to(device)
 
     # Test forward pass
     out = model(in_data)
@@ -82,6 +86,9 @@ def test_tfno(
 
     # Check backward pass
     loss = out.sum()
+    # take the modulus if data is complex-valued to create grad
+    if complex_data:
+        loss = (loss.real ** 2 + loss.imag ** 2) ** 0.5
     loss.backward()
 
     n_unused_params = 0
@@ -109,7 +116,7 @@ def test_fno_superresolution(output_scaling_factor):
     fc_channels = 32
     batch_size = 3
     n_layers = 3
-    use_mlp = True
+    use_channel_mlp = True
     n_dim = 2
     rank = 0.2
     size = (s,) * n_dim
@@ -125,7 +132,7 @@ def test_fno_superresolution(output_scaling_factor):
         rank=rank,
         output_scaling_factor=output_scaling_factor,
         n_layers=n_layers,
-        use_mlp=use_mlp,
+        use_channel_mlp=use_channel_mlp,
         fc_channels=fc_channels,
     ).to(device)
 

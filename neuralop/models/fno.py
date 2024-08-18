@@ -3,11 +3,12 @@ from functools import partialmethod
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..layers.embeddings import GridEmbeddingND, GridEmbedding2D
 from ..layers.spectral_convolution import SpectralConv
-from ..layers.spherical_convolution import SphericalConv
 from ..layers.padding import DomainPadding
 from ..layers.fno_block import FNOBlocks
-from ..layers.mlp import MLP
+from ..layers.channel_mlp import ChannelMLP
+from ..layers.complex import ComplexValued
 from .base_model import BaseModel
 
 class FNO(BaseModel, name='FNO'):
@@ -17,7 +18,7 @@ class FNO(BaseModel, name='FNO'):
     ----------
     n_modes : int tuple
         number of modes to keep in Fourier Layer, along each dimension
-        The dimensionality of the TFNO is inferred from ``len(n_modes)``
+        The dimensionality of the FNO is inferred from ``len(n_modes)``
     hidden_channels : int
         width of the FNO (i.e. number of channels)
     in_channels : int, optional
@@ -30,6 +31,13 @@ class FNO(BaseModel, name='FNO'):
         number of hidden channels of the projection block of the FNO, by default 256
     n_layers : int, optional
         Number of Fourier Layers, by default 4
+    positional_embedding : str literal | GridEmbedding2D | GridEmbeddingND | None
+        if "grid", appends a grid positional embedding with default settings to 
+        the last channels of raw input. Assumes the inputs are discretized
+        over a grid with entry [0,0,...] at the origin and side lengths of 1.
+        If an initialized GridEmbedding, uses this module directly
+        See `neuralop.embeddings.GridEmbeddingND` for details
+        if None, does nothing
     max_n_modes : None or int tuple, default is None
         * If not None, this allows to incrementally increase the number of
           modes in Fourier domain during training. Has to verify n <= N
@@ -44,22 +52,22 @@ class FNO(BaseModel, name='FNO'):
         if 'mixed', the contraction and inverse FFT run in half precision
     stabilizer : str {'tanh'} or None, optional
         By default None, otherwise tanh is used before FFT in the FNO block
-    use_mlp : bool, optional
-        Whether to use an MLP layer after each FNO block, by default False
-    mlp_dropout : float , optional
-        droupout parameter of MLP layer, by default 0
-    mlp_expansion : float, optional
-        expansion parameter of MLP layer, by default 0.5
+    use_channel_mlp : bool, optional
+        Whether to use a ChannelMLP layer after each FNO block, by default False
+    channel_mlp_dropout : float , optional
+        droupout parameter of ChannelMLP layer, by default 0
+    channel_mlp_expansion : float, optional
+        expansion parameter of ChannelMLP layer, by default 0.5
     non_linearity : nn.Module, optional
         Non-Linearity module to use, by default F.gelu
-    norm : F.module, optional
+    norm : Literal["ada_in", "group_norm", "instance_norm"], optional
         Normalization layer to use, by default None
     preactivation : bool, default is False
         if True, use resnet-style preactivation
     fno_skip : {'linear', 'identity', 'soft-gating'}, optional
         Type of skip connection to use in fno, by default 'linear'
-    mlp_skip : {'linear', 'identity', 'soft-gating'}, optional
-        Type of skip connection to use in mlp, by default 'soft-gating'
+    channel_mlp_skip : {'linear', 'identity', 'soft-gating'}, optional
+        Type of skip connection to use in channel-mixing mlp, by default 'soft-gating'
     separable : bool, default is False
         if True, use a depthwise separable spectral convolution
     factorization : str or None, {'tucker', 'cp', 'tt'}
@@ -90,6 +98,11 @@ class FNO(BaseModel, name='FNO'):
         How to perform domain padding, by default 'one-sided'
     fft_norm : str, optional
         by default 'forward'
+    conv_module : BaseConv, optional
+        Module to use for convolutions in FNO, by default SpectralConv
+    complex_data: bool, optional
+        whether FNO data takes on complex values 
+        in the spatial domain, by default False
     """
 
     def __init__(
@@ -101,18 +114,19 @@ class FNO(BaseModel, name='FNO'):
         lifting_channels=256,
         projection_channels=256,
         n_layers=4,
+        positional_embedding="grid",
         output_scaling_factor=None,
         max_n_modes=None,
         fno_block_precision="full",
-        use_mlp=False,
-        mlp_dropout=0,
-        mlp_expansion=0.5,
+        use_channel_mlp=False,
+        channel_mlp_dropout=0,
+        channel_mlp_expansion=0.5,
         non_linearity=F.gelu,
         stabilizer=None,
         norm=None,
         preactivation=False,
         fno_skip="linear",
-        mlp_skip="soft-gating",
+        channel_mlp_skip="soft-gating",
         separable=False,
         factorization=None,
         rank=1.0,
@@ -123,7 +137,8 @@ class FNO(BaseModel, name='FNO'):
         domain_padding=None,
         domain_padding_mode="one-sided",
         fft_norm="forward",
-        SpectralConv=SpectralConv,
+        conv_module=SpectralConv,
+        complex_data=False,
         **kwargs
     ):
         super().__init__()
@@ -145,13 +160,29 @@ class FNO(BaseModel, name='FNO'):
         self.fixed_rank_modes = fixed_rank_modes
         self.decomposition_kwargs = decomposition_kwargs
         self.fno_skip = (fno_skip,)
-        self.mlp_skip = (mlp_skip,)
+        self.channel_mlp_skip = (channel_mlp_skip,)
         self.fft_norm = fft_norm
         self.implementation = implementation
         self.separable = separable
         self.preactivation = preactivation
         self.fno_block_precision = fno_block_precision
 
+        if positional_embedding == "grid":
+            spatial_grid_boundaries = [[0., 1.]] * self.n_dim
+            self.positional_embedding = GridEmbeddingND(dim=self.n_dim, grid_boundaries=spatial_grid_boundaries)
+        elif isinstance(positional_embedding, GridEmbedding2D):
+            if self.n_dim == 2:
+                self.positional_embedding = positional_embedding
+            else:
+                raise ValueError(f'Error: expected {self.n_dim}-d positional embeddings, got {positional_embedding}')
+        elif isinstance(positional_embedding, GridEmbeddingND):
+            self.positional_embedding = positional_embedding
+        elif positional_embedding == None:
+            self.positional_embedding = None
+        else:
+            raise ValueError(f"Error: tried to instantiate FNO positional embedding with {positional_embedding},\
+                              expected one of \'grid\', GridEmbeddingND")
+        
         if domain_padding is not None and (
             (isinstance(domain_padding, list) and sum(domain_padding) > 0)
             or (isinstance(domain_padding, (float, int)) and domain_padding > 0)
@@ -165,6 +196,7 @@ class FNO(BaseModel, name='FNO'):
             self.domain_padding = None
 
         self.domain_padding_mode = domain_padding_mode
+        self.complex_data = complex_data
 
         if output_scaling_factor is not None and not joint_factorization:
             if isinstance(output_scaling_factor, (float, int)):
@@ -176,15 +208,16 @@ class FNO(BaseModel, name='FNO'):
             out_channels=hidden_channels,
             n_modes=self.n_modes,
             output_scaling_factor=output_scaling_factor,
-            use_mlp=use_mlp,
-            mlp_dropout=mlp_dropout,
-            mlp_expansion=mlp_expansion,
+            use_channel_mlp=use_channel_mlp,
+            channel_mlp_dropout=channel_mlp_dropout,
+            channel_mlp_expansion=channel_mlp_expansion,
             non_linearity=non_linearity,
             stabilizer=stabilizer,
             norm=norm,
             preactivation=preactivation,
             fno_skip=fno_skip,
-            mlp_skip=mlp_skip,
+            channel_mlp_skip=channel_mlp_skip,
+            complex_data=complex_data,
             max_n_modes=max_n_modes,
             fno_block_precision=fno_block_precision,
             rank=rank,
@@ -195,16 +228,20 @@ class FNO(BaseModel, name='FNO'):
             factorization=factorization,
             decomposition_kwargs=decomposition_kwargs,
             joint_factorization=joint_factorization,
-            SpectralConv=SpectralConv,
+            conv_module=conv_module,
             n_layers=n_layers,
             **kwargs
         )
-
-        # if lifting_channels is passed, make lifting an MLP
+        
+        # if adding a positional embedding, add those channels to lifting
+        lifting_in_channels = self.in_channels
+        if self.positional_embedding is not None:
+            lifting_in_channels += self.n_dim
+        # if lifting_channels is passed, make lifting a Channel-Mixing MLP
         # with a hidden layer of size lifting_channels
         if self.lifting_channels:
-            self.lifting = MLP(
-                in_channels=in_channels,
+            self.lifting = ChannelMLP(
+                in_channels=lifting_in_channels,
                 out_channels=self.hidden_channels,
                 hidden_channels=self.lifting_channels,
                 n_layers=2,
@@ -212,14 +249,18 @@ class FNO(BaseModel, name='FNO'):
             )
         # otherwise, make it a linear layer
         else:
-            self.lifting = MLP(
-                in_channels=in_channels,
-                out_channels=self.hidden_channels,
+            self.lifting = ChannelMLP(
+                in_channels=lifting_in_channels,
                 hidden_channels=self.hidden_channels,
+                out_channels=self.hidden_channels,
                 n_layers=1,
                 n_dim=self.n_dim,
             )
-        self.projection = MLP(
+        # Convert lifting to a complex ChannelMLP if self.complex_data==True
+        if self.complex_data:
+            self.lifting = ComplexValued(self.lifting)
+
+        self.projection = ChannelMLP(
             in_channels=self.hidden_channels,
             out_channels=out_channels,
             hidden_channels=self.projection_channels,
@@ -227,6 +268,8 @@ class FNO(BaseModel, name='FNO'):
             n_dim=self.n_dim,
             non_linearity=non_linearity,
         )
+        if self.complex_data:
+            self.projection = ComplexValued(self.projection)
 
     def forward(self, x, output_shape=None, **kwargs):
         """TFNO's forward pass
@@ -247,6 +290,10 @@ class FNO(BaseModel, name='FNO'):
         elif isinstance(output_shape, tuple):
             output_shape = [None]*(self.n_layers - 1) + [output_shape]
 
+        # append spatial pos embedding if set
+        if self.positional_embedding is not None:
+            x = self.positional_embedding(x)
+        
         x = self.lifting(x)
 
         if self.domain_padding is not None:
@@ -297,9 +344,9 @@ class FNO1d(FNO):
         output_scaling_factor=None,
         non_linearity=F.gelu,
         stabilizer=None,
-        use_mlp=False,
-        mlp_dropout=0,
-        mlp_expansion=0.5,
+        use_channel_mlp=False,
+        channel_mlp_dropout=0,
+        channel_mlp_expansion=0.5,
         norm=None,
         skip="soft-gating",
         separable=False,
@@ -326,9 +373,9 @@ class FNO1d(FNO):
             output_scaling_factor=output_scaling_factor,
             non_linearity=non_linearity,
             stabilizer=stabilizer,
-            use_mlp=use_mlp,
-            mlp_dropout=mlp_dropout,
-            mlp_expansion=mlp_expansion,
+            use_channel_mlp=use_channel_mlp,
+            channel_mlp_dropout=channel_mlp_dropout,
+            channel_mlp_expansion=channel_mlp_expansion,
             max_n_modes=max_n_modes,
             fno_block_precision=fno_block_precision,
             norm=norm,
@@ -376,9 +423,9 @@ class FNO2d(FNO):
         fno_block_precision="full",
         non_linearity=F.gelu,
         stabilizer=None,
-        use_mlp=False,
-        mlp_dropout=0,
-        mlp_expansion=0.5,
+        use_channel_mlp=False,
+        channel_mlp_dropout=0,
+        channel_mlp_expansion=0.5,
         norm=None,
         skip="soft-gating",
         separable=False,
@@ -405,9 +452,9 @@ class FNO2d(FNO):
             output_scaling_factor=output_scaling_factor,
             non_linearity=non_linearity,
             stabilizer=stabilizer,
-            use_mlp=use_mlp,
-            mlp_dropout=mlp_dropout,
-            mlp_expansion=mlp_expansion,
+            use_channel_mlp=use_channel_mlp,
+            channel_mlp_dropout=channel_mlp_dropout,
+            channel_mlp_expansion=channel_mlp_expansion,
             max_n_modes=max_n_modes,
             fno_block_precision=fno_block_precision,
             norm=norm,
@@ -459,9 +506,9 @@ class FNO3d(FNO):
         fno_block_precision="full",
         non_linearity=F.gelu,
         stabilizer=None,
-        use_mlp=False,
-        mlp_dropout=0,
-        mlp_expansion=0.5,
+        use_channel_mlp=False,
+        channel_mlp_dropout=0,
+        channel_mlp_expansion=0.5,
         norm=None,
         skip="soft-gating",
         separable=False,
@@ -490,9 +537,9 @@ class FNO3d(FNO):
             stabilizer=stabilizer,
             max_n_modes=max_n_modes,
             fno_block_precision=fno_block_precision,
-            use_mlp=use_mlp,
-            mlp_dropout=mlp_dropout,
-            mlp_expansion=mlp_expansion,
+            use_channel_mlp=use_channel_mlp,
+            channel_mlp_dropout=channel_mlp_dropout,
+            channel_mlp_expansion=channel_mlp_expansion,
             norm=norm,
             skip=skip,
             separable=separable,
@@ -545,8 +592,3 @@ TFNO = partialclass("TFNO", FNO, factorization="Tucker")
 TFNO1d = partialclass("TFNO1d", FNO1d, factorization="Tucker")
 TFNO2d = partialclass("TFNO2d", FNO2d, factorization="Tucker")
 TFNO3d = partialclass("TFNO3d", FNO3d, factorization="Tucker")
-
-SFNO = partialclass("SFNO", FNO, factorization="dense", SpectralConv=SphericalConv)
-SFNO.__doc__ = SFNO.__doc__.replace("Fourier", "Spherical Fourier", 1)
-SFNO.__doc__ = SFNO.__doc__.replace("FNO", "SFNO")
-SFNO.__doc__ = SFNO.__doc__.replace("fno", "sfno")
