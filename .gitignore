@@ -1,7 +1,7 @@
 # weights and biases
 .wandb/ 
 wandb_api_key.txt
-
+/scripts/wandb
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

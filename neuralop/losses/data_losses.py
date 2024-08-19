@@ -431,3 +431,35 @@ class MSELoss(object):
             return torch.mean((y_pred - y) ** 2, dim=dim).sum() # sum of MSEs for each element
         elif self.reductions == 'mean':
             return torch.mean((y_pred - y) ** 2, dim=dim).mean()
+
+
+
+class GasError(object):
+    def __init__(self, var,
+                  type='rela'):
+        super(GasError, self).__init__()
+        self.var = var # variable to be compared
+        self.type = type # type of error metrics
+    
+    def gas_plume_error(self, s_g, s_g_hat):
+        epislon = 1e-12
+        # s_g and s_g_hat are PyTorch tensors of shape (B*h*w, 1)
+        indicator = ((torch.abs(s_g) > 0.01) | (torch.abs(s_g_hat) > 0.01)).float()
+        sum_indicators = torch.sum(indicator)
+        abs_diff = torch.abs(s_g - s_g_hat) * indicator
+        
+        # Calculate gas plume error
+        error = torch.sum(abs_diff) / sum_indicators if sum_indicators >= epislon else 0.0
+        return error
+
+    def __call__(self, x, y):
+
+        if self.var == 'sg' or self.var == 'sat':
+            # we gonna use gas plume error
+            return self.gas_plume_error(x, y)
+        elif self.var == 'pressure' or self.var == 'p':
+            # we gonna use relative pressure error
+            pass
+        else:
+            # we gonna use relative velocity error
+            pass

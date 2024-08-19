@@ -12,12 +12,8 @@ from neuralop.utils import get_project_root
 
 logger = logging.Logger(logging.root.level)
 
-class DarcyDataset(PTDataset):
+class CCSDataset(PTDataset):
     """
-    DarcyDataset stores data generated according to Darcy's Law.
-    Input is a coefficient function and outputs describe flow. 
-
-    Data source: https://zenodo.org/records/10994262
 
     Attributes
     ----------
@@ -92,7 +88,7 @@ class DarcyDataset(PTDataset):
         resolutions = set(test_resolutions + [train_resolution])
 
         # We store data at these resolutions on the Zenodo archive
-        available_resolutions = [16, 32, 64, 128, 421]
+        available_resolutions = [16, 28, 32, 64, 128, 112, 421]
         for res in resolutions:
             assert res in available_resolutions, f"Error: resolution {res} not available"
 
@@ -101,16 +97,16 @@ class DarcyDataset(PTDataset):
             files_to_download = []
             already_downloaded_files = [x for x in root_dir.iterdir()]
             for res in resolutions:
-                if f"darcy_train_{res}.pt" not in already_downloaded_files or \
-                f"darcy_test_{res}.pt" not in already_downloaded_files:    
-                    files_to_download.append(f"darcy_{res}.tgz")
+                if f"ccs_train_{res}.pt" not in already_downloaded_files or \
+                f"ccs_test_{res}.pt" not in already_downloaded_files:    
+                    files_to_download.append(f"ccs_{res}.tgz")
             download_from_zenodo_record(record_id=zenodo_record_id,
                                         root=root_dir,
                                         files_to_download=files_to_download)
             
         # once downloaded/if files already exist, init PTDataset
         super().__init__(root_dir=root_dir,
-                       dataset_name="darcy",
+                       dataset_name="ccs",
                        n_train=n_train,
                        n_tests=n_tests,
                        batch_size=batch_size,
@@ -126,62 +122,25 @@ class DarcyDataset(PTDataset):
         
 # legacy Small Darcy Flow example
 example_data_root = get_project_root() / "neuralop/data/datasets/data"
-def load_darcy_flow_small(n_train,
+def load_CCS_flow(n_train,
     n_tests,
     batch_size,
     test_batch_sizes,
-    data_root = example_data_root,
+    data_root=None,
+    train_resolution=16,
     test_resolutions=[16, 32],
     encode_input=False,
     encode_output=True,
     encoding="channel-wise",
+    num_workers=4,
     channel_dim=1,):
 
-    dataset = DarcyDataset(root_dir = data_root,
-                           n_train=n_train,
-                           n_tests=n_tests,
-                           batch_size=batch_size,
-                           test_batch_sizes=test_batch_sizes,
-                           train_resolution=16,
-                           test_resolutions=test_resolutions,
-                           encode_input=encode_input,
-                           encode_output=encode_output,
-                           channel_dim=channel_dim,
-                           encoding=encoding,
-                           download=False)
-    
-    # return dataloaders for backwards compat
-    train_loader = DataLoader(dataset.train_db,
-                              batch_size=batch_size,
-                              num_workers=0,
-                              pin_memory=True,
-                              persistent_workers=False,)
-    
-    test_loaders = {}
-    for res,test_bsize in zip(test_resolutions, test_batch_sizes):
-        test_loaders[res] = DataLoader(dataset.test_dbs[res],
-                                       batch_size=test_bsize,
-                                       shuffle=False,
-                                       num_workers=0,
-                                       pin_memory=True,
-                                       persistent_workers=False,)
-    
-    return train_loader, test_loaders, dataset.data_processor
-    
-# legacy pt Darcy Flow loader
-def load_darcy_pt(n_train,
-                  n_tests,
-                  batch_size,
-                  test_batch_sizes,
-                  data_root = "./neuralop/data/datasets/data",
-                  train_resolution=16,
-                  test_resolutions=[16, 32],
-                  encode_input=False,
-                  encode_output=True,
-                  encoding="channel-wise",
-                  channel_dim=1,):
+    if data_root:
+        data_root = data_root
+    else:
+        data_root = example_data_root
 
-    dataset = DarcyDataset(root_dir = data_root,
+    dataset = CCSDataset(root_dir = data_root,
                            n_train=n_train,
                            n_tests=n_tests,
                            batch_size=batch_size,
@@ -190,14 +149,14 @@ def load_darcy_pt(n_train,
                            test_resolutions=test_resolutions,
                            encode_input=encode_input,
                            encode_output=encode_output,
-                           encoding=encoding,
                            channel_dim=channel_dim,
+                           encoding=encoding,
                            download=False)
     
     # return dataloaders for backwards compat
     train_loader = DataLoader(dataset.train_db,
                               batch_size=batch_size,
-                              num_workers=0,
+                              num_workers=num_workers,
                               pin_memory=True,
                               persistent_workers=False,)
     
@@ -206,7 +165,7 @@ def load_darcy_pt(n_train,
         test_loaders[res] = DataLoader(dataset.test_dbs[res],
                                        batch_size=test_bsize,
                                        shuffle=False,
-                                       num_workers=0,
+                                       num_workers=num_workers,
                                        pin_memory=True,
                                        persistent_workers=False,)
     

@@ -15,15 +15,15 @@ default: &DEFAULT
     seed: 666
 
   # FNO related
-  TFNO3d:
-    in_channels: 5 
+  tfno3d:
+    data_channels: 5
     out_channels: 1
     n_modes_height: 16
     n_modes_width: 16
     hidden_channels: 32
     projection_channels: 64
     n_layers: 4
-    domain_padding: 0.078125 #0.078125
+    domain_padding: 0.125 #0.078125
     domain_padding_mode: 'one-sided' #symmetric
     positional_embedding: None
     fft_norm: 'forward'
@@ -46,9 +46,9 @@ default: &DEFAULT
 
   # Optimizer
   opt:
-    n_epochs: 300
+    n_epochs: 100
     learning_rate: 5e-3
-    training_loss: 'h1'
+    training_loss: 'l2'
     weight_decay: 1e-4
     amp_autocast: False
 
@@ -60,14 +60,16 @@ default: &DEFAULT
 
   # Dataset related
   data:
-    batch_size: 16
-    n_train: 112
-    train_resolution: 16
-    n_tests: [28]
-    test_resolutions: [16]
+    data_root: '/scratch/groups/smbenson/isaac/01_gfv/ufno3d/data/pt_dataset'
+    batch_size: 2
+    num_workers: 4 # number of workers used for reading dataset
+    n_train: 112 # number of simulations
+    train_resolution: 112 # this is only used for finding training data
+    n_tests: [28] # number of simualations
+    test_resolutions: [28] # this is only used for finding testing data
     test_batch_sizes: [16]
     encode_input: True
-    encode_output: True
+    encode_output: False
 
   # Patching
   patching:
@@ -77,8 +79,8 @@ default: &DEFAULT
 
   # Weights and biases
   wandb:
-    log: True
-    name: None # If None, config will be used but you can override it here
+    log: False
+    name: 'gfv' # If None, config will be used but you can override it here
     group: '' 
     project: "ccs-operator-learning"
     entity: "graph-ccs" # put your username here

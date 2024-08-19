@@ -1,4 +1,5 @@
 from .darcy import DarcyDataset, load_darcy_flow_small
+from .ccs_dataset import CCSDataset, load_CCS_flow
 from .navier_stokes import NavierStokesDataset, load_navier_stokes_pt 
 from .pt_dataset import PTDataset
 from .burgers import load_burgers_1dtime

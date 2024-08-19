@@ -99,7 +99,7 @@ if config.distributed.use_distributed:
     )
 
 # Create the optimizer
-optimizer = torch.optim.Adam(
+optimizer = torch.optim.AdamW(
     model.parameters(),
     lr=config.opt.learning_rate,
     weight_decay=config.opt.weight_decay,
@@ -153,7 +153,7 @@ trainer = Trainer(
     n_epochs=config.opt.n_epochs,
     device=device,
     data_processor=data_processor,
-    amp_autocast=config.opt.amp_autocast,
+    mixed_precision=config.opt.amp_autocast,
     wandb_log=config.wandb.log,
     eval_interval=config.wandb.eval_interval,
     log_output=config.wandb.log_output,

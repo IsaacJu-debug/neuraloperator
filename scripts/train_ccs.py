@@ -6,7 +6,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import wandb
 
 from neuralop import H1Loss, LpLoss, Trainer, get_model
-from neuralop.data.datasets import load_darcy_flow_small
+from neuralop.losses.data_losses import GasError
+from neuralop.data.datasets import load_CCS_flow
 from neuralop.data.transforms.data_processors import MGPatchingDataProcessor
 from neuralop.training import setup
 from neuralop.utils import get_wandb_api_key, count_model_params
@@ -40,12 +41,12 @@ if config.wandb.log and is_logger:
             f"{var}"
             for var in [
                 config_name,
-                config.tfno2d.n_layers,
-                config.tfno2d.hidden_channels,
-                config.tfno2d.n_modes_width,
-                config.tfno2d.n_modes_height,
-                config.tfno2d.factorization,
-                config.tfno2d.rank,
+                config.tfno3d.n_layers,
+                config.tfno3d.hidden_channels,
+                config.tfno3d.n_modes_width,
+                config.tfno3d.n_modes_height,
+                config.tfno3d.factorization,
+                config.tfno3d.rank,
                 config.patching.levels,
                 config.patching.padding,
             ]
@@ -70,8 +71,12 @@ if config.verbose and is_logger:
     pipe.log()
     sys.stdout.flush()
 
+print("\nStart reading data\n")
 # Loading the Darcy flow dataset
-train_loader, test_loaders, data_processor = load_darcy_flow_small(
+train_loader, test_loaders, data_processor = load_CCS_flow(
+    train_resolution=config.data.train_resolution,
+    num_workers=config.data.num_workers,
+    data_root=config.data.data_root,
     n_train=config.data.n_train,
     batch_size=config.data.batch_size,
     test_resolutions=config.data.test_resolutions,
@@ -80,6 +85,7 @@ train_loader, test_loaders, data_processor = load_darcy_flow_small(
     encode_input=False,
     encode_output=False,
 )
+
 # convert dataprocessor to an MGPatchingDataprocessor if patching levels > 0
 if config.patching.levels > 0:
     data_processor = MGPatchingDataProcessor(in_normalizer=data_processor.in_normalizer,
@@ -88,18 +94,22 @@ if config.patching.levels > 0:
                                              stitching=config.patching.stitching,
                                              levels=config.patching.levels)
 data_processor = data_processor.to(device)
+print("\nFinish reading data\n")
 
 model = get_model(config)
 model = model.to(device)
 
+print("\nFinish creating model\n")
 # Use distributed data parallel
 if config.distributed.use_distributed:
     model = DDP(
         model, device_ids=[device.index], output_device=device.index, static_graph=True
     )
 
+print("\nFinish setting up distributed data parallel\n")
+
 # Create the optimizer
-optimizer = torch.optim.Adam(
+optimizer = torch.optim.AdamW(
     model.parameters(),
     lr=config.opt.learning_rate,
     weight_decay=config.opt.weight_decay,
@@ -123,6 +133,11 @@ elif config.opt.scheduler == "StepLR":
 else:
     raise ValueError(f"Got scheduler={config.opt.scheduler}")
 
+print("\nFinish setting up optimizer\n")
+
+# Creating the evaluation error
+var_type = 'sat'
+gas_error = GasError(var_type) # error metrics for gas saturation
 
 # Creating the losses
 l2loss = LpLoss(d=2, p=2)
@@ -136,7 +151,7 @@ else:
         f'Got training_loss={config.opt.training_loss} '
         f'but expected one of ["l2", "h1"]'
     )
-eval_losses = {"h1": h1loss, "l2": l2loss}
+eval_losses = {"h1": h1loss, "l2": l2loss, "gas_error": gas_error}
 
 if config.verbose and is_logger:
     print("\n### MODEL ###\n", model)
@@ -153,7 +168,7 @@ trainer = Trainer(
     n_epochs=config.opt.n_epochs,
     device=device,
     data_processor=data_processor,
-    amp_autocast=config.opt.amp_autocast,
+    mixed_precision=config.opt.amp_autocast,
     wandb_log=config.wandb.log,
     eval_interval=config.wandb.eval_interval,
     log_output=config.wandb.log_output,
